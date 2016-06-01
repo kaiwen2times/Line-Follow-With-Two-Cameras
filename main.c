@@ -42,9 +42,11 @@ void init_FTM2(void);
 void init_GPIO(void);
 void init_PIT(void);
 void init_ADC0(void);
+void init_ADC1(void);
 void FTM2_IRQHandler(void);
 void PIT0_IRQHandler(void);
 void ADC0_IRQHandler(void);
+void ADC1_IRQHandler(void);
 void motor1Write(unsigned int DutyCycle, int dir); // left motor
 void motor2Write(unsigned int DutyCycle, int dir); // right motor
 void servoWrite(float DutyCycle); // 6 right turn, 9 left turn
@@ -62,11 +64,12 @@ int pixcnt = -2;
 // clkval toggles with each FTM interrupt
 int clkval = 0;
 // line stores the current array of camera data
-int line[128];
-int diff[122];
+int wideCamera[128];
+int narrowCamera[128];
+int diff[128];
 
 // sampling frequency, the lower the faster
-int sample = 2;
+int sample = 1;
 int lcv;
 int dir = 0;
 
@@ -77,39 +80,44 @@ char str[100];
 
 // ADC0VAL holds the current ADC value
 int ADC0VAL;
+int ADC1VAL;
 
 // motor logic variable
 float servoRightCap = 9.0;
 float servoLeftCap = 6.0;
-float kpServo = 0.08;
+float kpServo = 0.07;
 
 //float kd = 5;
 float servoSpeed;
 int motor1Speed;
 int motor2Speed;
-int maxMotorSpeed = 100;
-int minMotorSpeed = 5;
+int maxMotorSpeed = 100 ;
+int minMotorSpeed = 0;
 int idealIndex = 60;
 int idealMotorSpeed = 50;
-float kpMotor = 1.7;
-float brake = 1.2;
+float kpMotor = 1.2;
+float brake = 0.7;
+int vtec = 15;
 
 // error variables
 int error;
 int lastError;
+int windowSize = 20;
 
 // diff related variables
 int currentIndex;
 int maxIndex;
 int maxIndexCap = 120;
 int minIndex;
-
 int minIndexCap = 17;
 int max;
 int min;
+int leftMin;
+int rightMin;
+int threshold = 25000;
 
 // debug flag
-int debug = 1;
+int debug = 0;
 
 int main()
 {
@@ -122,6 +130,7 @@ int main()
 	init_GPIO(); // For CLK and SI output on GPIO
 	init_FTM2(); // To generate CLK, SI, and trigger ADC
 	init_ADC0();
+	init_ADC1();
 	init_PIT();	// To trigger camera read based on integration time
 	InitPWM();
 
@@ -130,14 +139,14 @@ int main()
 		if (capcnt >= sample)
 		{
 			// send the array over uart
-			if(debug)
+			if(0)
 			{
 				GPIOB_PCOR |= (1 << 22);
 				sprintf(str,"%i\n\r",-1); // start value
 				put(str);
 				for (lcv = 0; lcv < 127; lcv++)
 				{
-					sprintf(str,"%i\n\r", line[lcv]);
+					sprintf(str,"%i\n\r", narrowCamera[lcv]);
 					put(str);
 				}
 				sprintf(str,"%i\n\r",-2); // end value
@@ -149,12 +158,12 @@ int main()
 			max = 0;
 			min = 0;
 			// calculate diff
-			for(lcv=3; lcv<125; lcv++)
+			for(lcv=0; lcv<128; lcv++)
 			{
-				diff[lcv] = line[lcv+1] - line[lcv];
+				diff[lcv] = wideCamera[lcv+1] - wideCamera[lcv];
 			}
 
-			for (lcv=0; lcv<122; lcv++)
+			for (lcv=3; lcv<124; lcv++)
 			{
 				if (diff[lcv] > max)
 				{
@@ -173,7 +182,7 @@ int main()
 
 			// PID algorithm
 			error = currentIndex - idealIndex;
-			lastError = (error == 0) ? -10 : abs(error) * brake;
+			lastError = (error <= 3 && error >= -3 ) ? -vtec : abs(error) * brake;
 			servoSpeed = (float)7.5 - error * kpServo;
 			motor1Speed = idealMotorSpeed - kpMotor * error - lastError;
 			motor2Speed = idealMotorSpeed + kpMotor * error - lastError;
@@ -183,16 +192,45 @@ int main()
 			motor1Speed = (motor1Speed < minMotorSpeed) ? minMotorSpeed : motor1Speed;
 			motor2Speed = (motor2Speed > maxMotorSpeed) ? maxMotorSpeed : motor2Speed;
 			motor2Speed = (motor2Speed < minMotorSpeed) ? minMotorSpeed : motor2Speed;
+			
+			
+			// stop at the finish line
+			leftMin = rightMin = narrowCamera[idealIndex];
+	
+			for(lcv=idealIndex; lcv>idealIndex-windowSize; lcv--)
+			{
+				if (narrowCamera[lcv] < leftMin)
+				{
+					leftMin = narrowCamera[lcv];
+				}
+			}
+			
+			for(lcv=idealIndex; lcv<idealIndex+windowSize; lcv++)
+			{
+				if (narrowCamera[lcv] < rightMin)
+				{
+					rightMin = narrowCamera[lcv];
+				}
+			}
+			
+			if(leftMin < threshold && rightMin < threshold)
+			{
+				motor1Write(0, dir);
+				motor2Write(0, dir);
+				servoWrite(7.5);
+				return 0;
+			}
 
-			if(0)
+			// debug code
+			if(debug)
 			{
 				sprintf(str,"error: %i\n\r", error);
 				put(str);
 				sprintf(str,"lastError: %i\n\r", lastError);
 				put(str);
-				sprintf(str,"motor1: %i\n\r", motor1Speed);
+				sprintf(str,"leftMin: %i\n\r", leftMin);
 				put(str);
-				sprintf(str,"motor2: %i\n\r", motor2Speed);
+				sprintf(str,"rightMin: %i\n\r", rightMin);
 				put(str);
 				put("\n\r");
 			}
@@ -200,7 +238,7 @@ int main()
 			motor1Write(motor1Speed, dir);
 			motor2Write(motor2Speed, dir);
 			servoWrite(servoSpeed);
-
+	
 			capcnt = 0;
 		}
 	} //for
@@ -247,8 +285,13 @@ void ADC0_IRQHandler(void)
 {
 	// Reading ADC0_RA clears the conversion complete flag
 	ADC0VAL = ADC0_RA;
-	//sprintf(str,"%i\n\r",ADC0VAL);
-	//put(str);
+}
+
+/* ADC1 Conversion Complete ISR  */
+void ADC1_IRQHandler(void)
+{
+	// Reading ADC0_RA clears the conversion complete flag
+	ADC1VAL = ADC1_RA;
 }
 
 /* 
@@ -274,7 +317,8 @@ void FTM2_IRQHandler(void)
 		{	// check for falling edge
 			// ADC read (note that integer division is 
 			//  occurring here for indexing the array)
-			line[pixcnt/2] = ADC0VAL;
+			wideCamera[pixcnt/2] = ADC0VAL;
+			narrowCamera[pixcnt/2] = ADC1VAL;
 		}
 		pixcnt += 1;
 	} 
@@ -288,7 +332,8 @@ void FTM2_IRQHandler(void)
 		{
 			GPIOB_PCOR |= (1 << 23); // SI = 0
 			// ADC read
-			line[0] = ADC0VAL;
+			wideCamera[0] = ADC0VAL;
+			narrowCamera[0] = ADC1VAL;
 		} 
 		pixcnt += 1;
 	} 
@@ -464,4 +509,42 @@ void init_ADC0(void)
 	
 	// Enable NVIC interrupt
     NVIC_EnableIRQ(ADC0_IRQn);
+}
+
+
+/* Set up ADC for capturing camera data */
+void init_ADC1(void)
+{
+    unsigned int calib;
+    // Turn on ADC1
+    SIM_SCGC3 |= SIM_SCGC3_ADC1_MASK;
+	
+	// Single ended 16 bit conversion, no clock divider
+	ADC1_CFG1 |= ADC_CFG1_ADIV(0x00);
+    ADC1_CFG1 |= ADC_CFG1_MODE(0x03);
+    
+    // Do ADC Calibration for Singled Ended ADC. Do not touch.
+    ADC1_SC3 = ADC_SC3_CAL_MASK;
+    while ( (ADC1_SC3 & ADC_SC3_CAL_MASK) != 0 );
+    calib = ADC1_CLP0; calib += ADC1_CLP1; calib += ADC1_CLP2;
+    calib += ADC1_CLP3; calib += ADC1_CLP4; calib += ADC1_CLPS;
+    calib = calib >> 1; calib |= 0x8000;
+    ADC1_PG = calib;
+    
+    // Select hardware trigger.
+    ADC1_SC2 |= ADC_SC2_ADTRG_MASK;
+    
+    // Set to single ended mode	
+	ADC1_SC1A = 0;
+    ADC1_SC1A |= ADC_SC1_AIEN_MASK;
+    ADC1_SC1A &= ~ADC_SC1_DIFF_MASK;
+    ADC1_SC1A |= ADC_SC1_ADCH(0x01);
+	
+	// Set up FTM2 trigger on ADC1
+	SIM_SOPT7 |= SIM_SOPT7_ADC1TRGSEL(0x0A); // FTM2 select
+	SIM_SOPT7 |= SIM_SOPT7_ADC1ALTTRGEN_MASK; // Alternative trigger en.
+	SIM_SOPT7 &= ~SIM_SOPT7_ADC1PRETRGSEL_MASK; // Pretrigger A
+	
+	// Enable NVIC interrupt
+    NVIC_EnableIRQ(ADC1_IRQn);
 }
