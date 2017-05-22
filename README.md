@@ -14,7 +14,7 @@ car uses one servo to steer and two DC motors for propulsion.
 
 ## Result
 
-Here is my team competing in the 2016 NXP Cup North America. We're one of the two teams representing RIT in the race. The final
+[Here](https://www.youtube.com/watch?v=6mLF0HtRhHY) is my team competing in the 2016 NXP Cup North America. We're one of the two teams representing RIT in the race. The final
 reuslt was 4th place out of 6 very competitive teams.
 
 ## Author
